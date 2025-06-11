@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+
+echo "Applying Traefik IP forwarding fix..."
+kubectl apply -f - <<'EOF'
+# This makes ip forwarding work with k3s & traefik
+# https://github.com/k3s-io/k3s/discussions/2997#discussioncomment-2008387
+apiVersion: helm.cattle.io/v1
+kind: HelmChartConfig
+metadata:
+  name: traefik
+  namespace: kube-system
+spec:
+  valuesContent: |-
+    service:
+      spec:
+        externalTrafficPolicy: Local
+        ipFamilyPolicy: RequireDualStack
+EOF
