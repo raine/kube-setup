@@ -1,0 +1,63 @@
+#!/bin/bash
+
+# Script to configure Traefik HelmChartConfig in k3s
+# This configures Traefik with:
+# - External traffic policy set to Local
+# - Dual stack IP family policy
+# - Debug logging enabled
+# - Access logs enabled with headers
+# - Log files stored on persistent volume
+# - Trusted IPs for forwarded headers (Cloudflare ranges)
+
+set -euo pipefail
+
+echo "Applying Traefik HelmChartConfig..."
+
+cat <<EOF | kubectl apply -f -
+apiVersion: helm.cattle.io/v1
+kind: HelmChartConfig
+metadata:
+  name: traefik
+  namespace: kube-system
+spec:
+  valuesContent: |-
+    service:
+      spec:
+        externalTrafficPolicy: Local
+        ipFamilyPolicy: RequireDualStack
+    logs:
+      general:
+        level: debug
+        filePath: "/var/log/traefik/traefik.log"
+      access:
+        enabled: true
+        filePath: "/var/log/traefik/access.log"
+        addInternals: false
+        fields:
+          headers:
+            defaultmode: keep
+            names:
+              User-Agent: keep
+              Referer: keep
+    deployment:
+      additionalVolumes:
+        - name: traefik-logs
+          hostPath:
+            path: /mnt/volume-fsn1-1/traefik/
+            type: DirectoryOrCreate
+    additionalVolumeMounts:
+      - name: traefik-logs
+        mountPath: /var/log/traefik/
+    additionalArguments:
+      - "--entryPoints.web.forwardedHeaders.trustedIPs=103.21.244.0/22,103.22.200.0/22,103.31.4.0/22,104.16.0.0/13,104.24.0.0/14,108.162.192.0/18,131.0.72.0/22,141.101.64.0/18,162.158.0.0/15,172.64.0.0/13,173.245.48.0/20,188.114.96.0/20,190.93.240.0/20,197.234.240.0/22,198.41.128.0/17,2400:cb00::/32,2606:4700::/32,2803:f800::/32,2405:b500::/32,2405:8100::/32,2a06:98c0::/29,2c0f:f248::/32"
+      - "--entryPoints.websecure.forwardedHeaders.trustedIPs=103.21.244.0/22,103.22.200.0/22,103.31.4.0/22,104.16.0.0/13,104.24.0.0/14,108.162.192.0/18,131.0.72.0/22,141.101.64.0/18,162.158.0.0/15,172.64.0.0/13,173.245.48.0/20,188.114.96.0/20,190.93.240.0/20,197.234.240.0/22,198.41.128.0/17,2400:cb00::/32,2606:4700::/32,2803:f800::/32,2405:b500::/32,2405:8100::/32,2a06:98c0::/29,2c0f:f248::/32"
+EOF
+
+echo "Traefik HelmChartConfig applied successfully!"
+echo ""
+echo "Note: Traefik will automatically reload with the new configuration."
+echo "Logs will be stored at: /mnt/volume-fsn1-1/traefik/"
+echo ""
+echo "To check the status:"
+echo "  kubectl get helmchartconfig traefik -n kube-system"
+echo "  kubectl get pods -n kube-system | grep traefik"
