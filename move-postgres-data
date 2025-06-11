@@ -1,0 +1,78 @@
+#!/bin/bash
+
+# Variables
+PG_VERSION="17"
+OLD_DATA_DIR="/var/lib/postgresql/${PG_VERSION}/main"
+NEW_DATA_DIR="/mnt/volume-fsn1-1/postgresql/${PG_VERSION}/main"
+PG_CONFIG="/etc/postgresql/${PG_VERSION}/main/postgresql.conf"
+
+# Colors for output
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+NC='\033[0m' # No Color
+
+echo "Moving PostgreSQL ${PG_VERSION} data directory to volume..."
+
+# 1. Stop PostgreSQL
+echo "Stopping PostgreSQL..."
+sudo systemctl stop postgresql
+
+# 2. Create new directory structure
+echo "Creating new directory structure..."
+sudo mkdir -p "/mnt/volume-fsn1-1/postgresql/${PG_VERSION}"
+
+# 3. Copy data with permissions preserved
+echo "Copying PostgreSQL data (this may take a while)..."
+sudo rsync -av "${OLD_DATA_DIR}/" "${NEW_DATA_DIR}/"
+
+# 4. Set correct ownership
+echo "Setting correct ownership..."
+sudo chown -R postgres:postgres "/mnt/volume-fsn1-1/postgresql"
+
+# 5. Update PostgreSQL configuration
+echo "Updating PostgreSQL configuration..."
+if [ -f "${PG_CONFIG}" ]; then
+	# Backup config
+	sudo cp "${PG_CONFIG}" "${PG_CONFIG}.backup.$(date +%Y%m%d_%H%M%S)"
+
+	# Update data_directory path
+	sudo sed -i "s|^data_directory = '${OLD_DATA_DIR}'|data_directory = '${NEW_DATA_DIR}'|g" "${PG_CONFIG}"
+
+	# If data_directory line doesn't exist, add it
+	if ! grep -q "^data_directory" "${PG_CONFIG}"; then
+		echo "data_directory = '${NEW_DATA_DIR}'" | sudo tee -a "${PG_CONFIG}"
+	fi
+else
+	echo -e "${RED}Error: PostgreSQL config not found at ${PG_CONFIG}${NC}"
+	exit 1
+fi
+
+# 6. Move old directory (rename as backup)
+echo "Renaming old data directory as backup..."
+sudo mv "${OLD_DATA_DIR}" "${OLD_DATA_DIR}.backup.$(date +%Y%m%d_%H%M%S)"
+
+# 8. Verify permissions
+echo "Verifying permissions..."
+sudo ls -la "${NEW_DATA_DIR}" | head -5
+
+# 9. Start PostgreSQL
+echo "Starting PostgreSQL..."
+sudo systemctl start postgresql
+
+# 10. Check status
+sleep 2
+if sudo systemctl is-active --quiet postgresql; then
+	echo -e "${GREEN}Success! PostgreSQL is running with new data directory${NC}"
+	echo "New data directory: ${NEW_DATA_DIR}"
+
+	# Verify it's using the new directory
+	sudo -u postgres psql -c "SHOW data_directory;"
+else
+	echo -e "${RED}Error: PostgreSQL failed to start${NC}"
+	echo "Check logs: sudo journalctl -xeu postgresql"
+	exit 1
+fi
+
+echo ""
+echo "Backup of old data directory: ${OLD_DATA_DIR}.backup.$(date +%Y%m%d_%H%M%S)"
+echo "You can remove it after verifying everything works: sudo rm -rf ${OLD_DATA_DIR}.backup.*"
