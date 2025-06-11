@@ -1,0 +1,35 @@
+apt-get install neovim
+
+# Function to add vim alias
+add_vim_alias() {
+	local user=$1
+	local bashrc=$2
+
+	if ! grep -q "alias vim='nvim'" "$bashrc" 2>/dev/null; then
+		echo "" >>"$bashrc"
+		echo "# Neovim alias" >>"$bashrc"
+		echo "alias vim='nvim'" >>"$bashrc"
+		echo "alias vi='nvim'" >>"$bashrc" # Optional: also alias vi
+		echo "Added vim alias to $bashrc"
+
+		# Fix ownership for non-root users
+		if [ "$user" != "root" ]; then
+			chown "$user:$user" "$bashrc"
+		fi
+	else
+		echo "vim alias already exists in $bashrc"
+	fi
+}
+
+# Configure for root
+echo "Adding vim alias for root..."
+add_vim_alias "root" "/root/.bashrc"
+
+# Configure for raine
+if id "raine" &>/dev/null; then
+	echo "Adding vim alias for user raine..."
+	RAINE_HOME=$(getent passwd raine | cut -d: -f6)
+	add_vim_alias "raine" "$RAINE_HOME/.bashrc"
+fi
+
+echo "Done! Run 'source ~/.bashrc' or open a new terminal to use the alias."

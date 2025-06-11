@@ -1,0 +1,295 @@
+#!/bin/bash
+# Ubuntu Automatic Security Updates for Production Servers with Pushover Notifications
+# No automatic reboots - manual control required
+
+set -e
+
+# Colors for output
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+NC='\033[0m'
+
+echo -e "${GREEN}=== Ubuntu Automatic Security Updates Setup (Production) ===${NC}"
+
+# Check if running as root
+if [ "$EUID" -ne 0 ]; then
+	echo -e "${RED}Please run as root (use sudo)${NC}"
+	exit 1
+fi
+
+# Get Pushover credentials
+echo -e "${YELLOW}Pushover Setup${NC}"
+echo "1. Sign up at https://pushover.net"
+echo "2. Install Pushover app on your phone ($5 one-time)"
+echo "3. Get your User Key from the website"
+echo "4. Create an Application and get the API Token"
+echo ""
+read -p "Enter your Pushover User Key: " PUSHOVER_USER_KEY
+read -p "Enter your Pushover API Token: " PUSHOVER_API_TOKEN
+
+# Install required packages
+echo -e "${YELLOW}Installing unattended-upgrades...${NC}"
+apt update
+apt install -y unattended-upgrades apt-listchanges curl
+
+# Configure unattended-upgrades for production
+echo -e "${YELLOW}Configuring unattended-upgrades for production...${NC}"
+cat >/etc/apt/apt.conf.d/50unattended-upgrades <<'EOF'
+// Automatically upgrade packages from these origins (security only)
+Unattended-Upgrade::Allowed-Origins {
+    "${distro_id}:${distro_codename}-security";
+    "${distro_id}ESMApps:${distro_codename}-apps-security";
+    "${distro_id}ESM:${distro_codename}-infra-security";
+};
+
+// Remove unused kernel packages automatically
+Unattended-Upgrade::Remove-Unused-Kernel-Packages "true";
+Unattended-Upgrade::Remove-Unused-Dependencies "true";
+Unattended-Upgrade::Remove-New-Unused-Dependencies "true";
+
+// NO automatic reboot for production
+Unattended-Upgrade::Automatic-Reboot "false";
+Unattended-Upgrade::Automatic-Reboot-WithUsers "false";
+
+// Disable email notifications - using Pushover instead
+// Unattended-Upgrade::Mail "";
+// Unattended-Upgrade::MailReport "";
+
+// Performance settings
+Unattended-Upgrade::MinimalSteps "true";
+Unattended-Upgrade::InstallOnShutdown "false";
+
+// Logging
+Unattended-Upgrade::SyslogEnable "true";
+Unattended-Upgrade::SyslogFacility "daemon";
+Unattended-Upgrade::LogVerbose "true";
+EOF
+
+# Configure update intervals
+echo -e "${YELLOW}Configuring update check intervals...${NC}"
+cat >/etc/apt/apt.conf.d/20auto-upgrades <<'EOF'
+APT::Periodic::Update-Package-Lists "1";
+APT::Periodic::Download-Upgradeable-Packages "1";
+APT::Periodic::AutocleanInterval "7";
+APT::Periodic::Unattended-Upgrade "1";
+EOF
+
+# Create Pushover notification function
+echo -e "${YELLOW}Creating Pushover notification function...${NC}"
+cat >/usr/local/bin/pushover-notify.sh <<EOF
+#!/bin/bash
+# Send notification via Pushover
+
+TITLE="\$1"
+MESSAGE="\$2"
+PRIORITY="\${3:-0}"
+SOUND="\${4:-pushover}"
+
+curl -s \\
+  --form-string "token=${PUSHOVER_API_TOKEN}" \\
+  --form-string "user=${PUSHOVER_USER_KEY}" \\
+  --form-string "title=\${TITLE}" \\
+  --form-string "message=\${MESSAGE}" \\
+  --form-string "priority=\${PRIORITY}" \\
+  --form-string "sound=\${SOUND}" \\
+  https://api.pushover.net/1/messages.json > /dev/null
+EOF
+chmod +x /usr/local/bin/pushover-notify.sh
+
+# Create reboot check script with Pushover
+echo -e "${YELLOW}Creating reboot notification script...${NC}"
+cat >/usr/local/bin/check-reboot-required.sh <<'EOF'
+#!/bin/bash
+# Check if reboot is required and notify via Pushover
+
+if [ -f /var/run/reboot-required ]; then
+    HOSTNAME=$(hostname)
+    PACKAGES=$(cat /var/run/reboot-required.pkgs 2>/dev/null | head -10 || echo "Package list not available")
+    
+    MESSAGE="Packages requiring reboot:
+${PACKAGES}
+
+Run: sudo reboot (during maintenance window)"
+
+    /usr/local/bin/pushover-notify.sh \
+        "🔄 Reboot Required: ${HOSTNAME}" \
+        "${MESSAGE}" \
+        "1" \
+        "siren"
+fi
+EOF
+chmod +x /usr/local/bin/check-reboot-required.sh
+
+# Create update notification script (Stateful Version)
+echo -e "${YELLOW}Creating stateful update notification script...${NC}"
+cat >/usr/local/bin/notify-updates.sh <<'EOF'
+#!/bin/bash
+# Check recent updates and errors, and notify only if new ones exist.
+
+LOG_FILE="/var/log/unattended-upgrades/unattended-upgrades.log"
+STATE_FILE_UPGRADE="/var/tmp/last_notified_upgrade.log"
+STATE_FILE_ERROR="/var/tmp/last_notified_error.log"
+HOSTNAME=$(hostname)
+
+if [ ! -f "$LOG_FILE" ]; then
+    exit 0
+fi
+
+# --- Check for new successful upgrades ---
+LAST_UPGRADE_LINE=$(grep "Packages that were upgraded:" "$LOG_FILE" | tail -n 1)
+
+if [ -n "$LAST_UPGRADE_LINE" ]; then
+    # Get the last notified line, if it exists
+    LAST_NOTIFIED_UPGRADE=$(cat "$STATE_FILE_UPGRADE" 2>/dev/null)
+
+    # If the latest upgrade is different from the last one we notified about
+    if [ "$LAST_UPGRADE_LINE" != "$LAST_NOTIFIED_UPGRADE" ]; then
+        UPGRADE_PACKAGES=$(echo "$LAST_UPGRADE_LINE" | sed 's/.*Packages that were upgraded: //')
+        MESSAGE="Security updates installed:
+${UPGRADE_PACKAGES}
+
+Check status with: update-status.sh"
+
+        /usr/local/bin/pushover-notify.sh \
+            "✅ Updates Installed: ${HOSTNAME}" \
+            "${MESSAGE}" \
+            "0" \
+            "cosmic"
+
+        # Save the new line to the state file so we don't notify again
+        echo "$LAST_UPGRADE_LINE" > "$STATE_FILE_UPGRADE"
+    fi
+fi
+
+# --- Check for new errors ---
+LAST_ERROR_LINE=$(grep -E "ERROR|FATAL" "$LOG_FILE" | tail -n 1)
+
+if [ -n "$LAST_ERROR_LINE" ]; then
+    # Get the last notified error line, if it exists
+    LAST_NOTIFIED_ERROR=$(cat "$STATE_FILE_ERROR" 2>/dev/null)
+
+    # If the latest error is different from the last one we notified about
+    if [ "$LAST_ERROR_LINE" != "$LAST_NOTIFIED_ERROR" ]; then
+        MESSAGE="Error detected during auto-update.
+Log: /var/log/unattended-upgrades/unattended-upgrades.log
+
+Last error line:
+${LAST_ERROR_LINE}"
+
+        /usr/local/bin/pushover-notify.sh \
+            "❌ Update Error: ${HOSTNAME}" \
+            "${MESSAGE}" \
+            "1" \
+            "falling"
+
+        # Save the new error to the state file
+        echo "$LAST_ERROR_LINE" > "$STATE_FILE_ERROR"
+    fi
+fi
+EOF
+chmod +x /usr/local/bin/notify-updates.sh
+
+# Create comprehensive status script
+echo -e "${YELLOW}Creating update status script...${NC}"
+cat >/usr/local/bin/update-status.sh <<'EOF'
+#!/bin/bash
+# Check automatic update status
+
+echo "=== Automatic Update Status for $(hostname) ==="
+echo "Date: $(date)"
+echo ""
+
+echo "Last update check:"
+ls -la /var/lib/apt/periodic/update-success-stamp 2>/dev/null || echo "Never"
+
+echo -e "\nPending updates:"
+/usr/lib/update-notifier/apt-check --human-readable 2>&1
+
+echo -e "\nReboot required:"
+if [ -f /var/run/reboot-required ]; then
+    echo "YES - Reboot required!"
+    cat /var/run/reboot-required.pkgs 2>/dev/null
+else
+    echo "No"
+fi
+
+echo -e "\nRecent security updates (last 7 days):"
+grep -E "^$(date +%Y-%m)" /var/log/unattended-upgrades/unattended-upgrades.log 2>/dev/null | grep -i "security" | tail -5
+
+echo -e "\nService status:"
+systemctl is-active unattended-upgrades
+
+echo -e "\nPushover notifications:"
+echo "Configured and active"
+EOF
+chmod +x /usr/local/bin/update-status.sh
+
+# Add cron jobs
+echo -e "${YELLOW}Setting up cron jobs...${NC}"
+(
+	crontab -l 2>/dev/null || true
+	echo "# Check for reboot requirement twice daily"
+) | crontab -
+(
+	crontab -l 2>/dev/null
+	echo "0 9,21 * * * /usr/local/bin/check-reboot-required.sh"
+) | crontab -
+(
+	crontab -l 2>/dev/null
+	echo "# Check for update status daily"
+) | crontab -
+(
+	crontab -l 2>/dev/null
+	echo "30 9 * * * /usr/local/bin/notify-updates.sh"
+) | crontab -
+
+# Enable and start the service
+echo -e "${YELLOW}Enabling automatic updates service...${NC}"
+systemctl enable unattended-upgrades
+systemctl start unattended-upgrades
+
+# Test Pushover notification
+echo -e "${YELLOW}Testing Pushover notification...${NC}"
+/usr/local/bin/pushover-notify.sh \
+	"🚀 Auto-Updates Configured: $(hostname)" \
+	"Automatic security updates are now active. You'll receive notifications for:
+- Security updates installed
+- Reboot requirements
+- Any errors
+
+No automatic reboots - manual intervention required." \
+	"0" \
+	"pushover"
+
+# Test the configuration
+echo -e "${YELLOW}Testing update configuration (dry run)...${NC}"
+unattended-upgrade --debug --dry-run 2>&1 | grep -E "(Checking|Allowed origins|Packages that will be upgraded)" | head -20
+
+# Display summary
+echo -e "${GREEN}=== Setup Complete ===${NC}"
+echo ""
+echo -e "${GREEN}✓ Security updates will be installed automatically${NC}"
+echo -e "${GREEN}✓ NO automatic reboots (manual intervention required)${NC}"
+echo -e "${GREEN}✓ Pushover notifications configured${NC}"
+echo -e "${GREEN}✓ Reboot checks twice daily (9 AM & 9 PM)${NC}"
+echo -e "${GREEN}✓ Update summary daily (9:30 AM)${NC}"
+echo ""
+echo -e "${YELLOW}Pushover Notification Types:${NC}"
+echo "  🔄 Reboot Required - High priority with siren sound"
+echo "  ✅ Updates Installed - Normal priority"
+echo "  ❌ Errors - High priority with falling sound"
+echo ""
+echo -e "${YELLOW}Useful commands:${NC}"
+echo "  Check update status:     update-status.sh"
+echo "  Test Pushover:          pushover-notify.sh 'Test' 'Test message'"
+echo "  Check if reboot needed:  [ -f /var/run/reboot-required ] && echo 'Yes' || echo 'No'"
+echo "  View update logs:        tail -f /var/log/unattended-upgrades/unattended-upgrades.log"
+echo "  Force update run:        unattended-upgrade --debug"
+echo ""
+echo -e "${YELLOW}Manual reboot procedure when notified:${NC}"
+echo "  1. Receive Pushover notification"
+echo "  2. Schedule maintenance window"
+echo "  3. For k8s nodes: kubectl drain <node-name>"
+echo "  4. Reboot: sudo reboot"
+echo "  5. For k8s nodes: kubectl uncordon <node-name>"
