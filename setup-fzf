@@ -1,0 +1,59 @@
+#!/bin/bash
+set -euo pipefail
+
+# Script to install fzf and configure it for history search with Ctrl-R
+
+FZF_VERSION="0.58.0"
+FZF_URL="https://github.com/junegunn/fzf/releases/download/v${FZF_VERSION}/fzf-${FZF_VERSION}-linux_arm64.tar.gz"
+
+echo "Installing fzf ${FZF_VERSION} for ARM64..."
+
+# Download and extract fzf
+wget -q "$FZF_URL" -O /tmp/fzf.tar.gz
+tar -xzf /tmp/fzf.tar.gz -C /tmp/
+sudo mv /tmp/fzf /usr/bin/
+rm /tmp/fzf.tar.gz
+
+# Make sure fzf is executable
+sudo chmod +x /usr/bin/fzf
+
+echo "fzf installed successfully"
+
+# Configure shell integration for root and raine user
+FZF_CONFIG='eval "$(fzf --bash)"'
+
+# Function to add fzf config to a bashrc file
+add_fzf_config() {
+	local bashrc_file="$1"
+	if [ -f "$bashrc_file" ]; then
+		if ! grep -q "fzf --bash" "$bashrc_file" 2>/dev/null; then
+			echo "" >>"$bashrc_file"
+			echo "# fzf configuration" >>"$bashrc_file"
+			echo "$FZF_CONFIG" >>"$bashrc_file"
+			echo "Added fzf configuration to $bashrc_file"
+		else
+			echo "fzf configuration already exists in $bashrc_file"
+		fi
+	else
+		echo "Creating $bashrc_file and adding fzf configuration"
+		echo "# fzf configuration" >"$bashrc_file"
+		echo "$FZF_CONFIG" >>"$bashrc_file"
+	fi
+}
+
+# Configure for root
+add_fzf_config "/root/.bashrc"
+
+# Configure for raine user
+if [ -d "/home/raine" ]; then
+	add_fzf_config "/home/raine/.bashrc"
+	# Ensure raine owns their bashrc
+	if [ -f "/home/raine/.bashrc" ]; then
+		chown raine:raine "/home/raine/.bashrc"
+	fi
+else
+	echo "User 'raine' home directory not found"
+fi
+
+echo "fzf setup complete!"
+echo "Press Ctrl-R in your shell to search command history"
