@@ -10,7 +10,6 @@ NC='\033[0m' # No Color
 # Configuration
 REGISTRY_USER="admin"
 REGISTRY_DATA_PATH="/mnt/volume-fsn1-1/docker-registry"
-VPN_IP="10.0.2.1"     # Your server's VPN IP
 REGISTRY_PORT="30500" # NodePort for direct access
 WORK_DIR="/tmp/registry-setup-$$"
 
@@ -33,6 +32,22 @@ cleanup() {
 }
 
 trap cleanup EXIT
+
+# Get VPN IP from wg0 interface
+get_vpn_ip() {
+	log_info "Detecting VPN IP from wg0 interface..."
+
+	# Extract IP from ifconfig wg0 output
+	VPN_IP=$(ifconfig wg0 2>/dev/null | grep 'inet ' | awk '{print $2}')
+
+	if [[ -z "$VPN_IP" ]]; then
+		log_error "Could not detect VPN IP from wg0 interface"
+		log_error "Make sure WireGuard is running and wg0 interface is up"
+		exit 1
+	fi
+
+	log_info "Detected VPN IP: $VPN_IP"
+}
 
 # Check prerequisites
 check_prerequisites() {
@@ -343,6 +358,7 @@ test_registry() {
 main() {
 	log_info "Starting private Docker registry setup (VPN IP-only access)..."
 
+	get_vpn_ip
 	check_prerequisites
 	setup_workdir
 	create_registry_directory
