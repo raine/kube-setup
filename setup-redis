@@ -1,0 +1,54 @@
+#!/usr/bin/bash
+
+# Install Redis
+sudo apt update
+sudo apt install -y redis-server
+
+# Create data directory on volume
+sudo mkdir -p /mnt/volume-fsn1-1/redis
+sudo chown redis:redis /mnt/volume-fsn1-1/redis
+
+# Backup original config
+sudo cp /etc/redis/redis.conf /etc/redis/redis.conf.backup
+
+# Configure Redis
+sudo tee /etc/redis/redis.conf >/dev/null <<'EOF'
+# Network
+bind 127.0.0.1 ::1 10.0.2.1
+protected-mode yes
+port 6379
+
+dir /var/lib/redis
+dbfilename dump.rdb
+save 900 1
+save 300 10
+save 60 10000
+
+appendonly no
+
+# Memory management
+maxmemory 2gb
+maxmemory-policy allkeys-lru
+
+# Security
+requirepass YOUR_STRONG_PASSWORD_HERE
+
+# Performance
+tcp-backlog 511
+timeout 0
+tcp-keepalive 300
+
+# Logging
+loglevel notice
+logfile /var/log/redis/redis-server.log
+EOF
+
+# Set password (replace with your actual password)
+sudo sed -i 's/YOUR_STRONG_PASSWORD_HERE/xxxx/' /etc/redis/redis.conf
+
+# Restart Redis
+sudo systemctl restart redis-server
+sudo systemctl enable redis-server
+
+# Configure firewall
+sudo ufw allow from 10.0.2.0/24 to any port 6379
