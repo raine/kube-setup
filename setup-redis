@@ -43,8 +43,15 @@ loglevel notice
 logfile /var/log/redis/redis-server.log
 EOF
 
-# Set password (replace with your actual password)
-sudo sed -i 's/YOUR_STRONG_PASSWORD_HERE/xxxx/' /etc/redis/redis.conf
+# Generate a strong random password
+REDIS_PASSWORD=$(openssl rand -base64 32)
+
+# Set the password in the config
+sudo sed -i "s/YOUR_STRONG_PASSWORD_HERE/$REDIS_PASSWORD/" /etc/redis/redis.conf
+
+# Save the password to a file for reference
+echo "Redis password: $REDIS_PASSWORD" | sudo tee /root/redis-password.txt
+sudo chmod 600 /root/redis-password.txt
 
 # Restart Redis
 sudo systemctl restart redis-server
@@ -52,3 +59,8 @@ sudo systemctl enable redis-server
 
 # Configure firewall
 sudo ufw allow from 10.0.2.0/24 to any port 6379
+
+echo ""
+echo "Redis setup complete!"
+echo "Password saved to: /root/redis-password.txt"
+echo "To test connection: redis-cli -h 10.0.2.1 -a \$(sudo cat /root/redis-password.txt)"
