@@ -1,0 +1,46 @@
+#!/bin/bash
+# Variables
+OLD_MOUNT="/mnt/HC_Volume_102714681"
+NEW_MOUNT="/mnt/volume-fsn1-1"
+DEVICE="/dev/sda"
+
+# Check if old mount exists
+if ! mountpoint -q "$OLD_MOUNT"; then
+	echo "Error: $OLD_MOUNT is not mounted"
+	exit 1
+fi
+
+# Create new mount point
+sudo mkdir -p "$NEW_MOUNT"
+
+# Backup fstab
+sudo cp /etc/fstab "/etc/fstab.backup.$(date +%Y%m%d_%H%M%S)"
+
+# Unmount old location
+echo "Unmounting $OLD_MOUNT..."
+sudo umount "$OLD_MOUNT"
+
+# Update fstab if entry exists
+if grep -q "$OLD_MOUNT" /etc/fstab; then
+	echo "Updating /etc/fstab..."
+	sudo sed -i "s|$OLD_MOUNT|$NEW_MOUNT|g" /etc/fstab
+fi
+
+# Mount to new location
+echo "Mounting to $NEW_MOUNT..."
+sudo mount "$DEVICE" "$NEW_MOUNT"
+
+# Verify mount
+if mountpoint -q "$NEW_MOUNT"; then
+	echo "Successfully mounted to $NEW_MOUNT"
+	df -h "$NEW_MOUNT"
+
+	# Remove old mount point
+	sudo rmdir "$OLD_MOUNT"
+	echo "Removed old mount point"
+else
+	echo "Error: Failed to mount to $NEW_MOUNT"
+	exit 1
+fi
+
+echo "Done! Volume is now mounted at $NEW_MOUNT"
