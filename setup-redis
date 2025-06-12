@@ -59,6 +59,7 @@ sudo systemctl enable redis-server
 
 # Configure firewall
 sudo ufw allow from 10.0.2.0/24 to any port 6379
+sudo ufw allow from 10.42.0.0/16 to any port 6379
 
 echo ""
 echo "Redis setup complete!"
