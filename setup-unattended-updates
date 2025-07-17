@@ -115,8 +115,8 @@ Run: sudo reboot (during maintenance window)"
     /usr/local/bin/pushover-notify.sh \
         "🔄 Reboot Required: ${HOSTNAME}" \
         "${MESSAGE}" \
-        "1" \
-        "siren"
+        "0" \
+        "pushover"
 fi
 EOF
 chmod +x /usr/local/bin/check-reboot-required.sh
