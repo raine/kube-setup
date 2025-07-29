@@ -29,9 +29,9 @@ read -p "Enter your Pushover User Key: " PUSHOVER_USER_KEY
 read -p "Enter your Pushover API Token: " PUSHOVER_API_TOKEN
 
 # Install required packages
-echo -e "${YELLOW}Installing unattended-upgrades...${NC}"
+echo -e "${YELLOW}Installing unattended-upgrades and dependencies...${NC}"
 apt update
-apt install -y unattended-upgrades apt-listchanges curl
+apt install -y unattended-upgrades apt-listchanges curl ubuntu-advantage-tools jq
 
 # Configure unattended-upgrades for production
 echo -e "${YELLOW}Configuring unattended-upgrades for production...${NC}"
@@ -97,27 +97,114 @@ curl -s \\
 EOF
 chmod +x /usr/local/bin/pushover-notify.sh
 
-# Create reboot check script with Pushover
-echo -e "${YELLOW}Creating reboot notification script...${NC}"
+# Create reboot check script with CVE severity detection
+echo -e "${YELLOW}Creating intelligent reboot notification script...${NC}"
 cat >/usr/local/bin/check-reboot-required.sh <<'EOF'
 #!/bin/bash
-# Check if reboot is required and notify via Pushover
+# Check if reboot is required and notify via Pushover only for critical updates
 
-if [ -f /var/run/reboot-required ]; then
-    HOSTNAME=$(hostname)
-    PACKAGES=$(cat /var/run/reboot-required.pkgs 2>/dev/null | head -10 || echo "Package list not available")
-    
-    MESSAGE="Packages requiring reboot:
-${PACKAGES}
+set -euo pipefail
 
-Run: sudo reboot (during maintenance window)"
+# Configuration
+PRO_CMD="/usr/bin/pro"
+JQ_CMD="/usr/bin/jq"
+PUSHOVER_CMD="/usr/local/bin/pushover-notify.sh"
+REBOOT_FLAG_FILE="/var/run/reboot-required"
+REBOOT_PKGS_FILE="/var/run/reboot-required.pkgs"
 
-    /usr/local/bin/pushover-notify.sh \
-        "🔄 Reboot Required: ${HOSTNAME}" \
-        "${MESSAGE}" \
-        "0" \
-        "pushover"
+# Exit if no reboot is required
+if [ ! -f "$REBOOT_FLAG_FILE" ]; then
+    exit 0
 fi
+
+# Read packages that require reboot
+mapfile -t PACKAGES < "$REBOOT_PKGS_FILE"
+
+CRITICAL_UPDATE_FOUND=false
+HIGH_UPDATE_FOUND=false
+CRITICAL_PACKAGES_SUMMARY=""
+HIGH_PACKAGES_SUMMARY=""
+ROUTINE_PACKAGES=""
+
+for pkg in "${PACKAGES[@]}"; do
+    # Get security status for the package
+    json_output=$($PRO_CMD security-status --package "$pkg" --format json 2>/dev/null || true)
+    
+    # Continue if the package has no security information
+    if [ -z "$json_output" ]; then
+        ROUTINE_PACKAGES+="  - $pkg (no CVE data available)\n"
+        continue
+    fi
+    
+    # Check for critical CVEs
+    has_critical_cve=$(echo "$json_output" | $JQ_CMD --arg pkg_name "$pkg" '
+        .[$pkg_name] | .cves | any(.priority == "critical")
+    ')
+    
+    # Check for high CVEs
+    has_high_cve=$(echo "$json_output" | $JQ_CMD --arg pkg_name "$pkg" '
+        .[$pkg_name] | .cves | any(.priority == "high")
+    ')
+    
+    if [ "$has_critical_cve" = "true" ]; then
+        CRITICAL_UPDATE_FOUND=true
+        summary=$(echo "$json_output" | $JQ_CMD -r --arg pkg_name "$pkg" '
+            "Package: " + $pkg_name + "\n" + 
+            (.[$pkg_name].cves | map(select(.priority == "critical")) | 
+            map("  - " + .id + " (CRITICAL)") | join("\n"))
+        ')
+        CRITICAL_PACKAGES_SUMMARY+="${summary}\n\n"
+    elif [ "$has_high_cve" = "true" ]; then
+        HIGH_UPDATE_FOUND=true
+        summary=$(echo "$json_output" | $JQ_CMD -r --arg pkg_name "$pkg" '
+            "Package: " + $pkg_name + "\n" + 
+            (.[$pkg_name].cves | map(select(.priority == "high")) | 
+            map("  - " + .id + " (HIGH)") | join("\n"))
+        ')
+        HIGH_PACKAGES_SUMMARY+="${summary}\n\n"
+    else
+        # Get the highest priority for logging
+        highest_priority=$(echo "$json_output" | $JQ_CMD -r --arg pkg_name "$pkg" '
+            .[$pkg_name].cves | map(.priority) | sort | reverse | .[0] // "none"
+        ')
+        ROUTINE_PACKAGES+="  - $pkg (highest CVE priority: $highest_priority)\n"
+    fi
+done
+
+# Send notification based on severity
+HOSTNAME=$(hostname)
+
+if [ "$CRITICAL_UPDATE_FOUND" = true ]; then
+    MESSAGE="CRITICAL security updates require immediate reboot:
+
+${CRITICAL_PACKAGES_SUMMARY}Run: sudo reboot (schedule immediately)"
+    
+    $PUSHOVER_CMD \
+        "🚨 CRITICAL Reboot Required: ${HOSTNAME}" \
+        "${MESSAGE}" \
+        "2" \
+        "siren"
+        
+elif [ "$HIGH_UPDATE_FOUND" = true ]; then
+    MESSAGE="HIGH severity security updates require reboot:
+
+${HIGH_PACKAGES_SUMMARY}Run: sudo reboot (during next maintenance window)"
+    
+    $PUSHOVER_CMD \
+        "⚠️ High Priority Reboot Required: ${HOSTNAME}" \
+        "${MESSAGE}" \
+        "1" \
+        "tugboat"
+        
+else
+    # Log routine updates but don't notify
+    if [ -n "$ROUTINE_PACKAGES" ]; then
+        logger -t check-reboot "Routine updates pending reboot (no notification sent):"
+        logger -t check-reboot "$ROUTINE_PACKAGES"
+    fi
+fi
+
+exit 0
 EOF
 chmod +x /usr/local/bin/check-reboot-required.sh
 
@@ -276,9 +363,12 @@ echo -e "${GREEN}✓ Reboot checks twice daily (9 AM & 9 PM)${NC}"
 echo -e "${GREEN}✓ Update summary daily (9:30 AM)${NC}"
 echo ""
 echo -e "${YELLOW}Pushover Notification Types:${NC}"
-echo "  🔄 Reboot Required - High priority with siren sound"
+echo "  🚨 CRITICAL Reboot - Emergency priority with siren (CVE critical)"
+echo "  ⚠️ High Priority Reboot - High priority with tugboat (CVE high)"
 echo "  ✅ Updates Installed - Normal priority"
 echo "  ❌ Errors - High priority with falling sound"
+echo ""
+echo "Note: Routine updates requiring reboot are logged but NOT notified"
 echo ""
 echo -e "${YELLOW}Useful commands:${NC}"
 echo "  Check update status:     update-status.sh"
